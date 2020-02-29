@@ -13,6 +13,32 @@ import subprocess
 import sys
 import time
 import traceback
+import logging
+from logging.handlers import TimedRotatingFileHandler
+
+
+root_logger = logging.getLogger()
+if not root_logger.handlers:
+    log_format = logging.Formatter('%(asctime)s %(levelname)s:  %(message)s')
+    root_logger.setLevel(logging.INFO)
+
+    log_dir = os.path.abspath('logs')
+    if os.path.exists(log_dir):
+        if not os.path.isdir(log_dir):
+            raise(Exception("Logging directory {d} exists but as a file.".format(d=log_dir)))
+    else:
+        os.makedirs(log_dir)
+
+    file_handler = TimedRotatingFileHandler('logs/safeway_coupon.log', when="midnight", interval=1, backupCount=30)
+    file_handler.setFormatter(log_format)
+    file_handler.setLevel(logging.INFO)
+    root_logger.addHandler(file_handler)
+
+    console_handler = logging.StreamHandler()
+    console_handler.setFormatter(log_format)
+    root_logger.addHandler(console_handler)
+
+
 
 # Parse options
 description = 'Automatically add online coupons to your Safeway card'
@@ -45,6 +71,9 @@ config = configparser.ConfigParser()
 config.read_file(itertools.chain(['[_no_section]'],
                                  open(options.accounts_config, 'r')))
 
+if options.debug:
+    root_logger.setLevel(logging.DEBUG)
+
 for section in config.sections():
     if section in ['_no_section', '_global']:
         if config.has_option(section, 'email_sender'):
@@ -58,8 +87,7 @@ for section in config.sections():
 
 if not email_sender:
     if options.email:
-        print('Warning: No email_sender defined. Summary information will be '
-              'printed on standard output instead.', file=sys.stderr)
+        logging.log(logging.WARNING, 'Warning: No email_sender defined. Summary information will be printed on standard output instead.')        
         options.email = False
 if len(auth) == 0:
     raise Exception('No valid accounts defined.')
@@ -148,8 +176,9 @@ class safeway():
         p.communicate(bytes(email_data.as_string(), 'UTF-8'))
 
     def _debug(self, message, level=1):
-        if options.debug >= level:
-            print(message)
+
+        loggingLevel = logging.DEBUG if 2==level else logging.INFO 
+        logging.log(loggingLevel, message)
 
     def _init_session(self):
         self.r_s = requests.Session()
@@ -230,7 +259,7 @@ class safeway():
         try:
             c = rsp.json()
         except Exception as e:
-            print('Error loading JSON: {}'.format(e))
+            logging.log(logging.ERROR, 'Error loading JSON: {}'.format(e))
             raise
         if 'errorCd' in c:
             raise Exception('Coupon clipping error code: {} ("{}")'
@@ -258,17 +287,27 @@ class safeway():
             offers = json.loads(data)
             if 'errors' in offers:
                 raise Exception('Error retrieving offers: {}'.format(offers))
+
+
+            count = 0
+            alreadyClippedCount = 0
+            for k,v in offers.items():
+                count += len(v)
+
+            self._debug("Retrieved {count} coupons.".format(count=count))
             for offer_type in offers.keys():
                 for i, offer in enumerate(offers[offer_type]):
+
+                    offerObj = OfferFactory(offer)
+
                     # if int(offer['offerId']) not in (730903573, 1323722231):
                     #     continue
-                    self._debug('Offer data for offer ID {}: {}'
-                                .format(offer['offerId'], offer),
-                                level=2)
+                    self._debug('Offer data for offer ID {}: {}'.format(offer['offerId'], offer), level=2)
                     coupon_type = offer['offerPgm']
                     clip_counts.setdefault(coupon_type, 0)
                     # Check if coupon or offer has been clipped already
                     if offer['status'] == 'C':
+                        alreadyClippedCount += 1
                         continue
                     post_data = {'items': []}
                     for clip_type in ['C', 'L']:
@@ -286,8 +325,8 @@ class safeway():
                         post_data
                     )
                     if clip_success:
-                        self._debug('Clipped coupon '
-                                    '{} {}'.format(coupon_type, oid))
+
+                        self._debug('Clipped coupon for {offer}.'.format(offer=offerObj))
                         clip_counts[coupon_type] += 1
                     else:
                         self._debug('Error clipping coupon '
@@ -327,6 +366,63 @@ class safeway():
                 self.mail_subject += ', {:d} errors'.format(error_count)
                 self._mail_append('Coupon clip errors: '
                                   '{:d}'.format(error_count))
+
+        self._debug('Clipped {clip_count} coupons. {ac} coupons were already claimed.'.format(clip_count=clip_count, ac=alreadyClippedCount))
+
+
+
+
+
+class Offer():
+    def __init__(self, o):
+        
+        self._extractName(o)
+        self._extractOfferPrice(o)
+        
+        try:
+            self.regularPrice = o['regularPrice']
+        except KeyError as err:            
+            logging.log(logging.ERROR, "Failed to find key for object. {e}".format(e=err))
+
+    def __str__(self):
+        return "{name} - {offer} (normally {regularPrice})".format(name=self.name, offer=self.offerPrice, regularPrice=self.regularPrice)
+
+    def _extractName(self, o):
+
+        for key in ['name', 'description']:
+            if key in o:
+                self.name = o[key]
+                return
+
+        raise Exception("Failed to find a suitable name in an offer.")
+
+    def _extractOfferPrice(self, o):
+
+        for key in ['offerPrice']:
+            if key in o:
+                self.offerPrice = o[key]
+                return
+
+        raise Exception("Failed to find a suitable offer price key.")
+
+
+class OfferPctOff(Offer):
+    
+    def __init__(self, o):
+        self._extractName(o)
+        self._extractOfferPrice(o)            
+
+    def __str__(self):
+        return "{name} - {offer}".format(name=self.name, offer=self.offerPrice)
+
+
+def OfferFactory(offer):
+
+    if not 'regularPrice' in offer:
+        return OfferPctOff(offer)
+    return Offer(offer)
+    
+
 
 
 def main():
