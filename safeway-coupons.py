@@ -16,7 +16,7 @@ import traceback
 import logging
 from logging.handlers import TimedRotatingFileHandler
 
-
+# Create a logger that logs to a rotating file as well as stdout
 root_logger = logging.getLogger()
 if not root_logger.handlers:
     log_format = logging.Formatter('%(asctime)s %(levelname)s:  %(message)s')
@@ -39,65 +39,11 @@ if not root_logger.handlers:
     root_logger.addHandler(console_handler)
 
 
-
-# Parse options
-description = 'Automatically add online coupons to your Safeway card'
-arg_parser = argparse.ArgumentParser(description=description)
-arg_parser.add_argument('-c', '--accounts-config', dest='accounts_config',
-                        metavar='file', required=True,
-                        help=('Path to configuration file containing Safeway '
-                              'accounts information'))
-arg_parser.add_argument('-d', '--debug', dest='debug', action='count',
-                        default=0,
-                        help='Print debugging information on stdout. Specify '
-                             'twice to increase verbosity.')
-arg_parser.add_argument('-n', '--no-email', dest='email', action='store_false',
-                        help=('Print summary information on standard output '
-                              'instead of sending email'))
-arg_parser.add_argument('-S', '--no-sleep', dest='sleep_skip', action='count',
-                        default=0,
-                        help=('Don\'t sleep between long requests. Specify '
-                              'twice to never sleep.'))
-options = arg_parser.parse_args()
-
-email_sender = ''
-auth = []
-
-if not os.path.isfile(options.accounts_config):
-    raise Exception('Accounts configuration file {} does not '
-                    'exist.'.format(options.accounts_config))
-
-config = configparser.ConfigParser()
-config.read_file(itertools.chain(['[_no_section]'],
-                                 open(options.accounts_config, 'r')))
-
-if options.debug:
-    root_logger.setLevel(logging.DEBUG)
-
-for section in config.sections():
-    if section in ['_no_section', '_global']:
-        if config.has_option(section, 'email_sender'):
-            email_sender = config.get(section, 'email_sender')
-    else:
-        account = {'username': section,
-                   'password': config.get(section, 'password')}
-        if config.has_option(section, 'notify'):
-            account.update({'notify': config.get(section, 'notify')})
-        auth.append(account)
-
-if not email_sender:
-    if options.email:
-        logging.log(logging.WARNING, 'Warning: No email_sender defined. Summary information will be printed on standard output instead.')        
-        options.email = False
-if len(auth) == 0:
-    raise Exception('No valid accounts defined.')
-
 sleep_multiplier = 1.0
 
 referer_data = 'http://www.safeway.com/ShopStores/Justforu-Coupons.page'
 
-user_agent = ('Mozilla/5.0 (Windows NT 6.1; WOW64; rv:64.0) '
-              'Gecko/20100101 Firefox/64.0')
+user_agent = ('Mozilla/5.0 (Windows NT 6.1; WOW64; rv:64.0) Gecko/20100101 Firefox/64.0')
 js_req_headers = {
     'Content-Type': 'application/json',
     'DNT': '1',
@@ -156,10 +102,10 @@ class safeway():
             print(mail_message_str)
             return
 
-        self._debug('Sending email to {}'.format(email_to))
-        self._debug('>>>>>>')
-        self._debug(mail_message_str)
-        self._debug('<<<<<<')
+        logging.info('Sending email to {}'.format(email_to))
+        logging.info('>>>>>>')
+        logging.info(mail_message_str)
+        logging.info('<<<<<<')
 
         email_data = email.mime.text.MIMEText(mail_message_str)
         email_data['To'] = email_to
@@ -168,17 +114,13 @@ class safeway():
             email_data['Subject'] = self.mail_subject
 
         if options.debug:
-            self._debug('Skip sending email due to -d/--debug')
+            logging.debug('Skip sending email due to -d/--debug')
             return
 
         p = subprocess.Popen(['/usr/sbin/sendmail', '-f', email_from, '-t'],
                              stdin=subprocess.PIPE)
         p.communicate(bytes(email_data.as_string(), 'UTF-8'))
 
-    def _debug(self, message, level=1):
-
-        loggingLevel = logging.DEBUG if 2==level else logging.INFO 
-        logging.log(loggingLevel, message)
 
     def _init_session(self):
         self.r_s = requests.Session()
@@ -195,7 +137,8 @@ class safeway():
                                 'OSSO-Login.page')
         rsp.stream = False
 
-        self._debug('Logging in as {}'.format(self.auth.get('username')))
+        logging.info('Logging in as {}'.format(self.auth.get('username')))
+
         login_data = {
             'source': 'WEB',
             'rememberMe': False,
@@ -204,27 +147,27 @@ class safeway():
         }
         headers = {'Content-type': 'application/json',
                    'Accept': 'application/json, text/javascript, */*; q=0.01'}
-        rsp = self._run_request(('https://www.safeway.com/iaaw/service/'
-                                 'authenticate'),
-                                json_data=login_data, headers=headers)
+        rsp = self._run_request(('https://www.safeway.com/iaaw/service/' 'authenticate'), json_data=login_data, headers=headers)
         rsp_data = json.loads(rsp.content.decode('UTF-8'))
         if not rsp_data.get('token') or rsp_data.get('errors'):
             raise Exception('Authentication failure')
         try:
             self.store_id = int(rsp_data['userAccount']['storeID'])
-        except KeyError:
-            pass
+        except KeyError as err:
+            logging.warning("KeyError when trying to retrieve store_id. Err: {e}".format(e=err))
         self.session_headers.update({
             'X-swyConsumerDirectoryPro': rsp_data['token'],
             'X-swyConsumerlbcookie': rsp_data['lbcookie']
         })
         self.r_s.headers.update(self.session_headers)
 
+
     def _run_request(self, url, data=None, json_data=None, headers=None):
+
         if data or json_data:
-            return self.r_s.post(url, headers=headers, data=data,
-                                 json=json_data)
+            return self.r_s.post(url, headers=headers, data=data, json=json_data)
         return self.r_s.get(url, headers=headers)
+
 
     def _save_coupon_details(self, offer, coupon_type):
         title = ' '.join([
@@ -240,6 +183,7 @@ class safeway():
             expires = 'Unknown'
         self._mail_append('Coupon: {} (expires: {})'
                           .format(title, expires))
+
 
     def _clip_coupon(self, oid, coupon_type, post_data):
         headers = js_req_headers
@@ -265,8 +209,9 @@ class safeway():
             raise Exception('Coupon clipping error code: {} ("{}")'
                             .format(c['errorCd'], c['errorMsg']))
 
-        self._debug('Clip response: {}'.format(c), level=2)
+        logging.debug('Clip response: {}'.format(c))        
         return (rsp.status_code == 200)
+
 
     def _clip_coupons(self):
         clip_counts = {}
@@ -274,7 +219,7 @@ class safeway():
         error_count = 0
 
         try:
-            self._debug('Retrieving coupons')
+            logging.info('Retrieving coupons')
             url = ('https://www.safeway.com'
                    '/abs/pub/web/j4u/api/offers/gallery'
                    '?storeId={}&offerPgm=PD-CC&rand={}'
@@ -294,15 +239,13 @@ class safeway():
             for k,v in offers.items():
                 count += len(v)
 
-            self._debug("Retrieved {count} coupons.".format(count=count))
+            logging.info("Retrieved {count} coupons.".format(count=count))
             for offer_type in offers.keys():
                 for i, offer in enumerate(offers[offer_type]):
 
                     offerObj = OfferFactory(offer)
 
-                    # if int(offer['offerId']) not in (730903573, 1323722231):
-                    #     continue
-                    self._debug('Offer data for offer ID {}: {}'.format(offer['offerId'], offer), level=2)
+                    logging.debug('Offer data for offer ID {}: {}'.format(offer['offerId'], offer))
                     coupon_type = offer['offerPgm']
                     clip_counts.setdefault(coupon_type, 0)
                     # Check if coupon or offer has been clipped already
@@ -326,15 +269,13 @@ class safeway():
                     )
                     if clip_success:
 
-                        self._debug('Clipped coupon for {offer}.'.format(offer=offerObj))
+                        logging.info('Clipped coupon for {offer}.'.format(offer=offerObj))
                         clip_counts[coupon_type] += 1
                     else:
-                        self._debug('Error clipping coupon '
-                                    '{} {}'.format(coupon_type, oid))
+                        logging.error('Error clipping coupon {} {}'.format(coupon_type, oid))
                         error_count += 1
                         if error_count >= 5:
-                            raise Exception('Reached error count threshold'
-                                            '({:d})'.format(error_count))
+                            raise Exception('Reached error count threshold ({:d})'.format(error_count))
                     if (offer['purchaseInd'] == 'B'):
                         self._save_coupon_details(offer, coupon_type)
                     # Simulate longer pauses for "scrolling" and "paging"
@@ -345,7 +286,7 @@ class safeway():
                             else:
                                 w = random.uniform(4.0, 8.0)
                             w *= sleep_multiplier
-                            self._debug('Waiting {} seconds'.format(str(w)))
+                            logging.debug('Waiting {} seconds'.format(str(w)))
                             time.sleep(w)
                     else:
                         if options.sleep_skip < 2:
@@ -367,7 +308,7 @@ class safeway():
                 self._mail_append('Coupon clip errors: '
                                   '{:d}'.format(error_count))
 
-        self._debug('Clipped {clip_count} coupons. {ac} coupons were already claimed.'.format(clip_count=clip_count, ac=alreadyClippedCount))
+        logging.info('Clipped {clip_count} coupons. {ac} coupons were already claimed.'.format(clip_count=clip_count, ac=alreadyClippedCount))
 
 
 
@@ -426,6 +367,60 @@ def OfferFactory(offer):
 
 
 def main():
+
+    # Parse options
+    description = 'Automatically add online coupons to your Safeway card'
+    arg_parser = argparse.ArgumentParser(description=description)
+    arg_parser.add_argument('-c', '--accounts-config', dest='accounts_config',
+                            metavar='file', required=True,
+                            help=('Path to configuration file containing Safeway '
+                                  'accounts information'))
+    arg_parser.add_argument('-d', '--debug', dest='debug', action='count',
+                            default=0,
+                            help='Print debugging information on stdout. Specify '
+                                 'twice to increase verbosity.')
+    arg_parser.add_argument('-n', '--no-email', dest='email', action='store_false',
+                            help=('Print summary information on standard output '
+                                  'instead of sending email'))
+    arg_parser.add_argument('-S', '--no-sleep', dest='sleep_skip', action='count',
+                            default=0,
+                            help=('Don\'t sleep between long requests. Specify '
+                                  'twice to never sleep.'))
+    options = arg_parser.parse_args()
+
+    email_sender = ''
+    auth = []
+
+    if not os.path.isfile(options.accounts_config):
+        raise Exception('Accounts configuration file {} does not  exist.'.format(options.accounts_config))
+
+    config = configparser.ConfigParser()
+    config.read_file(itertools.chain(['[_no_section]'],
+                                     open(options.accounts_config, 'r')))
+
+    if options.debug:
+        root_logger.setLevel(logging.DEBUG)
+
+    for section in config.sections():
+        if section in ['_no_section', '_global']:
+            if config.has_option(section, 'email_sender'):
+                email_sender = config.get(section, 'email_sender')
+        else:
+            account = {'username': section,
+                       'password': config.get(section, 'password')}
+            if config.has_option(section, 'notify'):
+                account.update({'notify': config.get(section, 'notify')})
+            auth.append(account)
+
+    if not email_sender:
+        if options.email:
+            logging.log(logging.WARNING, 'Warning: No email_sender defined. Summary information will be printed on standard output instead.')        
+            options.email = False
+    if len(auth) == 0:
+        raise Exception('No valid accounts defined.')
+
+
+
     exit_code = 0
     for index, user_data in enumerate(auth):
         try:
