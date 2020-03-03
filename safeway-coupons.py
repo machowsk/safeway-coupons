@@ -15,9 +15,12 @@ import time
 import traceback
 import logging
 from logging.handlers import TimedRotatingFileHandler
+from io import StringIO
 
 # Create a logger that logs to a rotating file as well as stdout
 root_logger = logging.getLogger()
+mail_buffer = StringIO()
+
 if not root_logger.handlers:
     log_format = logging.Formatter('%(asctime)s %(levelname)s:  %(message)s')
     root_logger.setLevel(logging.INFO)
@@ -37,6 +40,12 @@ if not root_logger.handlers:
     console_handler = logging.StreamHandler()
     console_handler.setFormatter(log_format)
     root_logger.addHandler(console_handler)
+
+    mail_handler = logging.StreamHandler(mail_buffer)
+    mail_formatter = logging.Formatter('%(message)s')
+    mail_handler.setFormatter(mail_formatter)
+    mail_handler.setLevel(logging.INFO)
+    root_logger.addHandler(mail_handler)
 
 
 sleep_multiplier = 1.0
@@ -58,9 +67,9 @@ js_req_headers = {
 
 
 class safeway():
-    def __init__(self, auth):
+    def __init__(self, auth, sleep_skip=0, send_email=False, debugging=False, email_sender=''):
         self.auth = auth
-        self.mail_message = []
+        self.sleep_skip = sleep_skip
         self.mail_subject = 'Safeway coupons'
         self.session_headers = {}
         self.store_id = 1
@@ -71,41 +80,31 @@ class safeway():
             self._clip_coupons()
         except Exception as e:
             self.mail_subject += ' (error)'
-            self._mail_append('Exception: {}'.format(str(e)))
-            for line in traceback.format_exc().split(os.linesep):
-                self._mail_append(line)
+            self._log_exception(e, 'Exception clipping coupons.')            
             raise
         finally:
-            if self.mail_message:
-                self._send_mail()
+            if mail_buffer.tell() > 0:            
+                self._send_mail(email_sender, debugging=debugging)
 
-    def _mail_append(self, line):
-        self.mail_message.append(line)
+    def _log_exception(self, e, description):
 
-    def _mail_append_exception(self, e, description):
-        self._mail_append('{}: {}'.format(description, str(e)))
-        for line in traceback.format_exc().split(os.linesep):
-            self._mail_append(line)
+        fullException = '{}: {}'.format(description, str(e))        
+        for line in traceback.format_exec().split(os.linesep):
+            fullException += line        
 
-    def _send_mail(self):
+        logging.error(fullException)
+            
+
+    def _send_mail(self, email_sender, debugging=False):
         email_to = self.auth.get('notify') or self.auth.get('username')
         email_from = email_sender
 
-        if self.mail_message[0].startswith('Coupon: '):
-            self.mail_message.insert(0, 'Clipped coupons for items you buy:')
+        mail_message_str = mail_buffer.getvalue().strip()
 
         account_str = 'Safeway account: {}'.format(self.auth.get('username'))
-        self.mail_message.insert(0, account_str)
-        mail_message_str = os.linesep.join(self.mail_message)
-
-        if not options.email:
-            print(mail_message_str)
-            return
+        mail_message_str = os.linesep.join([account_str, 'Clipped coupons for items you buy:' if mail_message_str.startswith('Coupon: ') else '', mail_message_str])        
 
         logging.info('Sending email to {}'.format(email_to))
-        logging.info('>>>>>>')
-        logging.info(mail_message_str)
-        logging.info('<<<<<<')
 
         email_data = email.mime.text.MIMEText(mail_message_str)
         email_data['To'] = email_to
@@ -113,13 +112,16 @@ class safeway():
         if self.mail_subject:
             email_data['Subject'] = self.mail_subject
 
-        if options.debug:
+        if debugging:
             logging.debug('Skip sending email due to -d/--debug')
             return
 
-        p = subprocess.Popen(['/usr/sbin/sendmail', '-f', email_from, '-t'],
-                             stdin=subprocess.PIPE)
-        p.communicate(bytes(email_data.as_string(), 'UTF-8'))
+        sendmail_app_path = '/usr/sbin/sendmail'
+        if os.path.exists(sendmail_app_path):
+            p = subprocess.Popen([sendmail_app_path, '-f', email_from, '-t'], stdin=subprocess.PIPE)
+            p.communicate(bytes(email_data.as_string(), 'UTF-8'))
+        else:
+            logging.error('No sendmail app found at {smp}. Email will not be sent.'.format(smp=sendmail_app_path))            
 
 
     def _init_session(self):
@@ -177,15 +179,16 @@ class safeway():
             offer.get('name', '')
         ])
         try:
-            expires = datetime.datetime.fromtimestamp(
-                int(offer['endDate']) / 1000).strftime('%Y.%m.%d')
+            expires = datetime.datetime.fromtimestamp(int(offer['endDate']) / 1000).strftime('%Y.%m.%d')
         except Exception:
             expires = 'Unknown'
-        self._mail_append('Coupon: {} (expires: {})'
-                          .format(title, expires))
+
+        coupon_details = 'Coupon: {title} (expires: {expiration_date})'.format(title=title, expiration_date=expires)
+        logging.info(coupon_details)        
 
 
     def _clip_coupon(self, oid, coupon_type, post_data):
+        
         headers = js_req_headers
         headers.update(self.session_headers)
         headers.update({
@@ -203,7 +206,7 @@ class safeway():
         try:
             c = rsp.json()
         except Exception as e:
-            logging.log(logging.ERROR, 'Error loading JSON: {}'.format(e))
+            self._log_exception(e, 'Error loading JSON')            
             raise
         if 'errorCd' in c:
             raise Exception('Coupon clipping error code: {} ("{}")'
@@ -243,7 +246,7 @@ class safeway():
             for offer_type in offers.keys():
                 for i, offer in enumerate(offers[offer_type]):
 
-                    offerObj = OfferFactory(offer)
+                    offerObj = Offer(offer)
 
                     logging.debug('Offer data for offer ID {}: {}'.format(offer['offerId'], offer))
                     coupon_type = offer['offerPgm']
@@ -268,7 +271,6 @@ class safeway():
                         post_data
                     )
                     if clip_success:
-
                         logging.info('Clipped coupon for {offer}.'.format(offer=offerObj))
                         clip_counts[coupon_type] += 1
                     else:
@@ -280,7 +282,7 @@ class safeway():
                         self._save_coupon_details(offer, coupon_type)
                     # Simulate longer pauses for "scrolling" and "paging"
                     if i > 0 and i % 12 == 0:
-                        if options.sleep_skip < 1:
+                        if self.sleep_skip < 1:
                             if i % 48 == 0:
                                 w = random.uniform(15.0, 25.0)
                             else:
@@ -289,24 +291,23 @@ class safeway():
                             logging.debug('Waiting {} seconds'.format(str(w)))
                             time.sleep(w)
                     else:
-                        if options.sleep_skip < 2:
+                        if self.sleep_skip < 2:
                             time.sleep(random.uniform(0.3, 0.8) *
                                        sleep_multiplier)
                         pass
                     clip_count += 1
         except Exception as e:
-            self._mail_append_exception(e, 'Exception clipping coupons')
+            self._log_exception(e, 'Exception clipping coupons')
 
         if clip_count > 0 or error_count > 0:
             self.mail_subject += ': {:d} clipped'.format(clip_count)
-            self._mail_append('Clipped {:d} coupons total:'.format(clip_count))
+            logging.info('Clipped {:d} coupons total:'.format(clip_count))
             for section_tuple in clip_counts.items():
-                self._mail_append('    {} => {:d} '
+                logging.info('    {} => {:d} '
                                   'coupons'.format(*section_tuple))
             if error_count > 0:
                 self.mail_subject += ', {:d} errors'.format(error_count)
-                self._mail_append('Coupon clip errors: '
-                                  '{:d}'.format(error_count))
+                logging.info('Coupon clip errors: {:d}'.format(error_count))
 
         logging.info('Clipped {clip_count} coupons. {ac} coupons were already claimed.'.format(clip_count=clip_count, ac=alreadyClippedCount))
 
@@ -316,53 +317,40 @@ class safeway():
 
 class Offer():
     def __init__(self, o):
-        
-        self._extractName(o)
-        self._extractOfferPrice(o)
-        
+
+        self.name = o.get('name', '')
+        self.description = o.get('description', '')
+        self.brand = o.get('brand', '')
+        self.offerPrice = o.get('offerPrice', '')        
+        self.regularPrice = o.get('regularPrice')
+
+        self.expiration = o.get('endDate', 'unknown')
+        if self.expiration:
+            try:
+                self.expiration = datetime.datetime.fromtimestamp(int(self.expiration) / 1000).strftime('%Y.%m.%d')
+            except Exception:
+                self.expiration = 'unknown'
+
+    def __str__(self):
+
         try:
-            self.regularPrice = o['regularPrice']
-        except KeyError as err:            
-            logging.log(logging.ERROR, "Failed to find key for object. {e}".format(e=err))
+            price = ''
+            if not self.regularPrice:
+                price = self.offerPrice
+            else:
+                price = '{p} (normally {r})'.format(p=self.offerPrice, r=self.regularPrice)
 
-    def __str__(self):
-        return "{name} - {offer} (normally {regularPrice})".format(name=self.name, offer=self.offerPrice, regularPrice=self.regularPrice)
+            title = ' '.join([
+                price,
+                self.brand,
+                self.description,
+                self.name
+            ])       
 
-    def _extractName(self, o):
-
-        for key in ['name', 'description']:
-            if key in o:
-                self.name = o[key]
-                return
-
-        raise Exception("Failed to find a suitable name in an offer.")
-
-    def _extractOfferPrice(self, o):
-
-        for key in ['offerPrice']:
-            if key in o:
-                self.offerPrice = o[key]
-                return
-
-        raise Exception("Failed to find a suitable offer price key.")
-
-
-class OfferPctOff(Offer):
-    
-    def __init__(self, o):
-        self._extractName(o)
-        self._extractOfferPrice(o)            
-
-    def __str__(self):
-        return "{name} - {offer}".format(name=self.name, offer=self.offerPrice)
-
-
-def OfferFactory(offer):
-
-    if not 'regularPrice' in offer:
-        return OfferPctOff(offer)
-    return Offer(offer)
-    
+            return 'Coupon: {title} (expires: {expiration_date})'.format(title=title, expiration_date=self.expiration)
+        except Exception as e:
+            logging.error("Exception in string conversion of Offer {e}".format(e=e))
+            return 'DEFAULT OFFER STRING'    
 
 
 
@@ -424,7 +412,7 @@ def main():
     exit_code = 0
     for index, user_data in enumerate(auth):
         try:
-            safeway(user_data)
+            safeway(user_data, options.sleep_skip, send_email=options.email, debugging=options.debug, email_sender=email_sender)
         except Exception:
             # The safeway class already handles exceptions, but re-raises them
             # so safeway-coupons can exit with an error code
