@@ -83,7 +83,7 @@ class safeway():
             self._log_exception(e, 'Exception clipping coupons.')            
             raise
         finally:
-            if mail_buffer.tell() > 0:            
+            if send_email and mail_buffer.tell() > 0:            
                 self._send_mail(email_sender, debugging=debugging)
 
     def _log_exception(self, e, description):
