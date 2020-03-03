@@ -1,1 +1,5 @@
 *.swp
+.vs/
+safeway_coupons.pyproj
+logs/*
+safeway_config.txt
