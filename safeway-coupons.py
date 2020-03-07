@@ -168,23 +168,7 @@ class safeway():
 
         if data or json_data:
             return self.r_s.post(url, headers=headers, data=data, json=json_data)
-        return self.r_s.get(url, headers=headers)
-
-
-    def _save_coupon_details(self, offer, coupon_type):
-        title = ' '.join([
-            offer.get('offerPrice', ''),
-            offer.get('brand', ''),
-            offer.get('description', ''),
-            offer.get('name', '')
-        ])
-        try:
-            expires = datetime.datetime.fromtimestamp(int(offer['endDate']) / 1000).strftime('%Y.%m.%d')
-        except Exception:
-            expires = 'Unknown'
-
-        coupon_details = 'Coupon: {title} (expires: {expiration_date})'.format(title=title, expiration_date=expires)
-        logging.info(coupon_details)        
+        return self.r_s.get(url, headers=headers)      
 
 
     def _clip_coupon(self, oid, coupon_type, post_data):
@@ -271,15 +255,17 @@ class safeway():
                         post_data
                     )
                     if clip_success:
-                        logging.info('Clipped coupon for {offer}.'.format(offer=offerObj))
+                        logging.info('Clipped {offer}.'.format(offer=offerObj))
                         clip_counts[coupon_type] += 1
                     else:
                         logging.error('Error clipping coupon {} {}'.format(coupon_type, oid))
                         error_count += 1
                         if error_count >= 5:
                             raise Exception('Reached error count threshold ({:d})'.format(error_count))
+
                     if (offer['purchaseInd'] == 'B'):
-                        self._save_coupon_details(offer, coupon_type)
+                        logging.info(offerObj)
+                        
                     # Simulate longer pauses for "scrolling" and "paging"
                     if i > 0 and i % 12 == 0:
                         if self.sleep_skip < 1:
