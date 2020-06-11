@@ -88,11 +88,14 @@ class safeway():
 
     def _log_exception(self, e, description):
 
-        fullException = '{}: {}'.format(description, str(e))        
-        for line in traceback.format_exec().split(os.linesep):
-            fullException += line        
-
-        logging.error(fullException)
+        fullException = '{}: {}'.format(description, str(e))      
+        try:
+            for line in traceback.format_exc().split(os.linesep):
+                fullException += line        
+        except Exception as e:
+            pass
+        finally:
+            logging.error(fullException)
             
 
     def _send_mail(self, email_sender, debugging=False):
@@ -298,9 +301,6 @@ class safeway():
         logging.info('Clipped {clip_count} coupons. {ac} coupons were already claimed.'.format(clip_count=clip_count, ac=alreadyClippedCount))
 
 
-
-
-
 class Offer():
     def __init__(self, o):
 
@@ -337,7 +337,6 @@ class Offer():
         except Exception as e:
             logging.error("Exception in string conversion of Offer {e}".format(e=e))
             return 'DEFAULT OFFER STRING'    
-
 
 
 def main():
@@ -399,7 +398,7 @@ def main():
     for index, user_data in enumerate(auth):
         try:
             safeway(user_data, options.sleep_skip, send_email=options.email, debugging=options.debug, email_sender=email_sender)
-        except Exception:
+        except Exception as exp:
             # The safeway class already handles exceptions, but re-raises them
             # so safeway-coupons can exit with an error code
             exit_code = 1
